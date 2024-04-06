@@ -1,0 +1,269 @@
+#include <Wire.h>
+#include <TimeLib.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+#include <Stepper.h> 
+// De forskellige reference libraries for at få allerede definerede kode.
+
+// Afsender og modtagelse pins for HC10 Bluetooth
+SoftwareSerial blueToothSerial(2, 3); // RX, TX
+
+// LCD settings
+const int lcdColumns = 16; // Antal kolonner i LCD'en
+const int lcdRows = 2;     // Antal rækker i LCD'en
+LiquidCrystal_I2C lcd(0x27, lcdColumns, lcdRows); 
+
+//Definer variabler til at gemme nuværende tid og valgt tid
+int currentHours = -1;
+int currentMinutes = -1;
+int currentSeconds = -1;
+int pickedHours = -1;
+int pickedMinutes = -1;
+int pickedSeconds = -1;
+
+//Definer flag for at spore modtagelse af tidsdata
+bool hasSeconds = false;        
+bool currentTimeReceived = false; 
+bool pickedTimeReceived = false;  
+
+//Definer antallet af skridt pr. revolution og opret et Stepper-objekt
+const int stepsPerRevolution = 2048; 
+Stepper myStepper(stepsPerRevolution, 8, 10, 9, 11); 
+
+// Funktionsdeklarationer
+void incrementCurrentTime();
+void processBluetoothData();
+void startCountdown();
+void displayCurrentTime();
+
+void setup() {
+ Serial.begin(9600);
+ blueToothSerial.begin(9600);
+ Wire.begin();
+ lcd.init();
+ lcd.backlight();
+ pinMode(LED_BUILTIN, OUTPUT);
+
+ // Vis startbesked på LCD'en
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Waiting for");
+ lcd.setCursor(0, 1);
+ lcd.print("Bluetooth data...");
+}
+
+void loop() {
+ processBluetoothData();
+
+ // Hvis den valgte tid endnu ikke er modtaget, fortsæt med at tælle den nuværende tid op
+ if (!pickedTimeReceived && currentTimeReceived) {
+     incrementCurrentTime();
+ }
+}
+
+void incrementCurrentTime() {
+ // Forøg den nuværende tid med ét sekund
+ currentSeconds++;
+ if (currentSeconds >= 60) {
+     currentSeconds = 0;
+     currentMinutes++;
+     if (currentMinutes >= 60) {
+         currentMinutes = 0;
+         currentHours++;
+         if (currentHours >= 24) {
+             currentHours = 0;
+         }
+     }
+ }
+
+ // Vis den forøgede nuværende tid på LCD'en
+ displayCurrentTime();
+
+ 
+ delay(1000);
+}
+
+void displayCurrentTime() {
+ // Udskriv nuværende tid på Serial Monitor kun hvis den ikke er blevet udskrevet før
+ static bool timePrinted = false;
+ if (!timePrinted) {
+   Serial.print("Current Time: ");
+   Serial.print(currentHours);
+   Serial.print(":");
+   Serial.print(currentMinutes);
+   Serial.print(":");
+   Serial.println(currentSeconds);
+   timePrinted = true; 
+ }
+
+ // Vis den nuværende tid på LCD'en
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Current Time:");
+
+
+ lcd.setCursor(0, 1);
+ if (currentHours < 10) lcd.print("0");
+ lcd.print(currentHours);
+ lcd.print(":");
+ if (currentMinutes < 10) lcd.print("0");
+ lcd.print(currentMinutes);
+ lcd.print(":");
+ if (currentSeconds < 10) lcd.print("0");
+ lcd.print(currentSeconds);
+}
+
+void processBluetoothData() {
+ if (blueToothSerial.available() > 0) {
+     String receivedData = blueToothSerial.readStringUntil('\n');
+     Serial.println("Received Data: " + receivedData); 
+  
+     // Kontroller længden af de modtagne data for at bestemme formatet
+     if (receivedData == "stop timer") {
+         Serial.println("Stop timer command received from app");
+         
+     }
+     else if (receivedData.length() == 8 && receivedData.charAt(2) == ':' && receivedData.charAt(5) == ':') {
+        // Format med sekunder "00:00:00"
+         hasSeconds = true;
+         currentHours = receivedData.substring(0, 2).toInt();
+         currentMinutes = receivedData.substring(3, 5).toInt();
+         currentSeconds = receivedData.substring(6, 8).toInt();
+         currentTimeReceived = true;
+     } else if (receivedData.length() == 5 && receivedData.charAt(2) == ':') {
+         // Format uden sekunder "00:00"
+         hasSeconds = false;
+         pickedHours = receivedData.substring(0, 2).toInt();
+         pickedMinutes = receivedData.substring(3, 5).toInt();
+         pickedSeconds = 0; // Sæt sekunder til 0
+         pickedTimeReceived = true;
+
+
+         // Start beregning af nedtælling, hvis både nuværende tid og valgt tid er modtaget
+         if (currentTimeReceived) {
+             startCountdown();
+         }
+     } else {
+         // Ugyldigt format, håndtér det tilsvarende
+         Serial.println("Invalid Time Format");
+         return;
+     }
+ }
+}
+
+void startCountdown() {
+  
+  currentTimeReceived = false;
+  pickedTimeReceived = false;
+
+  // Beregn tidsforskellen mellem valgt tid og nuværende tid
+  int deltaHours = pickedHours - currentHours;
+  int deltaMinutes = pickedMinutes - currentMinutes;
+  int deltaSeconds = pickedSeconds - currentSeconds;
+
+  // Juster, hvis den valgte tid er senere end den nuværende tid
+  if (deltaHours < 0 || (deltaHours == 0 && deltaMinutes < 0) || (deltaHours == 0 && deltaMinutes == 0 && deltaSeconds < 0)) {
+    // Beregn tid indtil næste forekomst af valgt tid på den følgende dag
+    int nextDayHours = 24 - currentHours + pickedHours;
+    int nextDayMinutes = 0;
+    int nextDaySeconds = 0;
+    if (pickedMinutes < currentMinutes) {
+      nextDayHours--;
+      nextDayMinutes = 60 - (currentMinutes - pickedMinutes);
+    } else {
+      nextDayMinutes = pickedMinutes - currentMinutes;
+    }
+    if (pickedSeconds < currentSeconds) {
+      nextDayMinutes--;
+      nextDaySeconds = 60 - (currentSeconds - pickedSeconds);
+    } else {
+      nextDaySeconds = pickedSeconds - currentSeconds;
+    }
+    deltaHours = nextDayHours;
+    deltaMinutes = nextDayMinutes;
+    deltaSeconds = nextDaySeconds;
+  }
+
+  // Hvis minutter eller sekunder er negative, juster dem
+  while (deltaSeconds < 0) {
+    deltaSeconds += 60;
+    deltaMinutes--;
+  }
+  while (deltaMinutes < 0) {
+    deltaMinutes += 60;
+    deltaHours--;
+  }
+
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Countdown:");
+
+  lcd.setCursor(0, 1);
+  if (deltaHours < 10) lcd.print("0");
+  lcd.print(deltaHours);
+  lcd.print(":");
+  if (deltaMinutes < 10) lcd.print("0");
+  lcd.print(deltaMinutes);
+  lcd.print(":");
+  if (deltaSeconds < 10) lcd.print("0");
+  lcd.print(deltaSeconds);
+
+  
+  Serial.print("Countdown: ");
+  Serial.print(deltaHours);
+  Serial.print(":");
+  Serial.print(deltaMinutes);
+  Serial.print(":");
+  Serial.println(deltaSeconds);
+
+  // Main countdown loop
+while (true) {
+    lcd.setCursor(0, 1);
+    if (deltaHours < 10) lcd.print("0");
+    lcd.print(deltaHours);
+    lcd.print(":");
+    if (deltaMinutes < 10) lcd.print("0");
+    lcd.print(deltaMinutes);
+    lcd.print(":");
+    if (deltaSeconds < 10) lcd.print("0");
+    lcd.print(deltaSeconds);
+
+    // Flyt stepper-motoren, når nedtællingen når 00:00:00
+    if (deltaHours == 0 && deltaMinutes == 0 && deltaSeconds == 0) {
+      int stepsToTurn = 137; // Adjust this value as needed
+      Serial.print("Starting stepper motor operation...");
+      for (int i = 0; i < stepsToTurn; i++) {
+        Serial.print("Step ");
+        Serial.println(i); 
+        myStepper.step(1); 
+        delay(5); 
+      }
+      Serial.println("Stepper motor operation complete");
+    }
+
+    
+    delay(1000);
+
+   // Opdater tidskomponenter
+if (deltaSeconds == 0) {
+  if (deltaMinutes == 0) {
+    if (deltaHours == 0) {
+      // nulstil til 23:59:59 efter at have nået 00:00:00
+      deltaHours = 23;
+      deltaMinutes = 59;
+      deltaSeconds = 59;
+    } else {
+      deltaHours--;
+      deltaMinutes = 59;
+    }
+  } else {
+    deltaMinutes--;
+  }
+  deltaSeconds = 59;
+} else {
+  deltaSeconds--;
+}
+}
+}
+
