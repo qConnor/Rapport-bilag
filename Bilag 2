@@ -1,0 +1,340 @@
+import SwiftUI
+import CoreBluetooth
+
+class BluetoothManager: NSObject, ObservableObject, CBCentralManagerDelegate {
+    @Published var isConnected: Bool = false
+    @Published var discoveredPeripherals: [CBPeripheral] = []
+    var connectedPeripheral: CBPeripheral?
+    var characteristic: CBCharacteristic?
+
+    var centralManager: CBCentralManager!
+
+    override init() {
+        super.init()
+        centralManager = CBCentralManager(delegate: self, queue: nil)
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if central.state == .poweredOn {
+            isConnected = true
+            centralManager.scanForPeripherals(withServices: nil, options: nil)
+        } else {
+            isConnected = false
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
+        // Add discovered peripherals to the array
+        if !discoveredPeripherals.contains(peripheral) {
+            discoveredPeripherals.append(peripheral)
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        print("Connected to peripheral: \(peripheral)")
+        connectedPeripheral = peripheral
+        peripheral.delegate = self
+        peripheral.discoverServices(nil)
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            // Send current time after 2 seconds
+            self.sendCurrentTimeToPeripheral()
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        print("Failed to connect to peripheral: \(peripheral), error: \(error?.localizedDescription ?? "Unknown Error")")
+    }
+    
+    func sendCommandToPeripheral(_ command: String) {
+        if let peripheral = connectedPeripheral, let characteristic = characteristic {
+            let data = command.data(using: .utf8)!
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+        }
+    }
+
+    func sendDataToPeripheral(_ data: Data) {
+        if let peripheral = connectedPeripheral, let characteristic = characteristic {
+            peripheral.writeValue(data, for: characteristic, type: .withResponse)
+        }
+    }
+    
+    func sendCurrentTimeToPeripheral() {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let currentTimeString = formatter.string(from: Date())
+        let message = "\(currentTimeString)\n"
+        if let data = message.data(using: .utf8) {
+            sendDataToPeripheral(data)
+        }
+    }
+}
+
+extension BluetoothManager: CBPeripheralDelegate {
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        guard let services = peripheral.services else { return }
+        for service in services {
+            peripheral.discoverCharacteristics(nil, for: service)
+        }
+    }
+    
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        guard let characteristics = service.characteristics else { return }
+        for characteristic in characteristics {
+            self.characteristic = characteristic
+            
+        }
+    }
+}
+
+struct ContentView: View {
+    @StateObject var bluetoothManager = BluetoothManager()
+    @State private var isConnecting = false
+    @State private var setTime: Date = UserDefaults.standard.object(forKey: "selectedTime") as? Date ?? Date()
+    @State private var showTimePicker = false
+    @State private var showBluetoothDeviceList = false
+    @State private var isTimerRunning = false
+    @State private var countdownSeconds = 0
+    @State private var timer: Timer?
+    @State private var originalSetTime: Date?
+    @State private var currentTime: Date = Date()
+    @State private var bluetoothMessage: String = ""
+    @State private var selectedPeripheral: CBPeripheral?
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 10.0) {
+                Text("Current Time")
+                    .font(.title)
+                    .fontWeight(.bold)
+                    .padding(.top)
+
+                Text(formatTime(currentTime))
+                    .font(.largeTitle)
+                    .fontWeight(.bold)
+                    .padding()
+
+                VStack {
+                    Text("Countdown Timer")
+                        .font(.headline)
+
+                    Text(formatTime(countdownSeconds))
+                        .font(.title)
+                        .padding()
+
+                    HStack {
+                        Button(action: {
+                            toggleTimer()
+                        }) {
+                            Text(isTimerRunning ? "Stop Timer" : "Start Timer")
+                                .foregroundColor(.red) // Stop button color
+   }
+                        .padding()
+                        .disabled(!isTimerRunning)
+
+                        Button(action: {
+                            if bluetoothManager.isConnected {
+                                
+                                self.showBluetoothDeviceList = true
+                            } else {
+                               
+                                self.bluetoothMessage = "Please connect to Bluetooth to do this action"
+                            }
+                        }) {
+                            Text("Scan for Bluetooth Devices")
+                        }
+                        .padding()
+                        .disabled(isConnecting)
+                        .foregroundColor(bluetoothManager.isConnected ? .primary : .gray)
+                    }
+                    .overlay(
+                        withAnimation {
+                            Text(bluetoothMessage)
+                                .foregroundColor(.red)
+                                .padding(.top, 8)
+                                .padding(.horizontal, 16)
+                                .background(Color.white.opacity(0.8))
+                                .cornerRadius(8)
+                                .padding(.top, -48)
+                                .opacity(bluetoothMessage.isEmpty ? 0 : 1)
+                        }
+                    )
+
+                    VStack {
+                        HStack {
+                            Text("Set Time:")
+                                .font(.headline)
+
+                            Button(action: {
+                                self.showTimePicker.toggle()
+                            }) {
+                                Text("Set")
+                                    .foregroundColor(.blue)
+                            }
+                            .padding(.trailing)
+                        }
+                        if showTimePicker {
+                            DatePicker("", selection: $setTime, displayedComponents: .hourAndMinute)
+                                .datePickerStyle(WheelDatePickerStyle())
+                                .padding(.horizontal)
+                            Button(action: {
+                                if bluetoothManager.isConnected {
+                                    
+                                    startTimerWithSelectedTime()
+                                    self.showTimePicker.toggle()
+                                } else {
+                                   
+                                    self.bluetoothMessage = "Please connect to Bluetooth to do this action"
+                                }
+                            }) {
+                                Text("Confirm")
+                                    .foregroundColor(.blue)
+                            }
+                            .padding()
+                        }
+                    }
+                }
+
+                Spacer()
+            }
+            .sheet(isPresented: $showBluetoothDeviceList) {
+                NavigationView {
+                    List(bluetoothManager.discoveredPeripherals.filter { $0.name != nil && $0.name != "Unnamed Device" }, id: \.self) { peripheral in
+                        Button(action: {
+                           
+                            self.selectedPeripheral = peripheral
+                       
+                            showBluetoothDeviceList = false
+                         
+                            if let selectedPeripheral = selectedPeripheral {
+                                bluetoothManager.centralManager.connect(selectedPeripheral, options: nil)
+                            }
+                        }) {
+                            Text(peripheral.name ?? "Unnamed Device")
+                        }
+                    }
+                    .navigationBarTitle("Bluetooth Devices")
+                }
+            }
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+        
+            currentTime = Date()
+           
+            if isTimerRunning {
+                countdownSeconds -= 1
+                if countdownSeconds == 0 {
+                    resetTimer()
+                }
+            }
+        }
+    }
+  func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .medium
+        return formatter.string(from: date)
+    }
+
+    func formatTime(_ totalSeconds: Int) -> String {
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        return String(format:
+                        "%02d:%02d:%02d", hours, minutes, seconds)
+                    }
+
+                    func startTimer() {
+                     
+                        UserDefaults.standard.set(setTime, forKey: "selectedTime")
+                       
+                        originalSetTime = setTime
+                        updateCountdown()
+                        isTimerRunning = true
+                    }
+
+                    func stopTimer() {
+                        isTimerRunning = false
+                    }
+
+                    func toggleTimer() {
+                        isTimerRunning.toggle()
+                    }
+
+                    func resetTimer() {
+                        countdownSeconds = 86399 // 23 hours, 59 minutes, and 59 seconds
+                    }
+
+                    func updateCountdown() {
+                        guard let originalSetTime = originalSetTime else {
+                            return
+                        }
+
+                        let calendar = Calendar.current
+                        let currentDate = Date()
+
+                       
+                        var timeDifference = originalSetTime.timeIntervalSince(currentDate)
+
+                       
+                        if timeDifference < 0 {
+                            let nextDay = calendar.date(byAdding: .day, value: 1, to: currentDate)!
+                            let selectedTimeOnNextDay = calendar.date(bySettingHour: calendar.component(.hour, from: originalSetTime), minute: calendar.component(.minute, from: originalSetTime), second: 0, of: nextDay)!
+
+                            timeDifference = selectedTimeOnNextDay.timeIntervalSince(currentDate)
+                        }
+
+                     
+                        let hours = Int(timeDifference) / 3600
+                        let minutes = (Int(timeDifference) % 3600) / 60
+                        let seconds = Int(timeDifference) % 60
+
+                   
+                        let adjustedHours = hours % 24
+
+                    
+                        let countdownSeconds = max(adjustedHours * 3600 + minutes * 60 + seconds, 0)
+
+                   
+                        self.countdownSeconds = countdownSeconds
+                    }
+
+                    func startTimerWithSelectedTime() {
+                       
+                        UserDefaults.standard.set(setTime, forKey: "selectedTime")
+                        
+                        originalSetTime = setTime
+                        updateCountdown()
+                        isTimerRunning = true
+
+                    
+                        let formatter = DateFormatter()
+                        formatter.dateFormat = "HH:mm"
+                        let formattedTime = formatter.string(from: setTime)
+
+                       
+                        if let formattedData = formattedTime.data(using: .utf8) {
+                            bluetoothManager.sendDataToPeripheral(formattedData)
+                        }
+                    }
+
+                 
+                    func sendBluetoothData() {
+                        
+                        let currentTime = Date()
+
+                        
+                        let formatter = DateFormatter()
+                        formatter.dateFormat = "HH:mm:ss"
+                        let formattedCurrentTime = formatter.string(from: currentTime)
+
+                     
+                        let bluetoothMessage = "Stop Button Pressed - Current Time: \(formattedCurrentTime)"
+
+                        if let data = bluetoothMessage.data(using: .utf8) {
+                           
+                            bluetoothManager.sendDataToPeripheral(data)
+                        }
+                    }
+                }
+
+
